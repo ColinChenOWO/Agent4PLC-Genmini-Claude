@@ -53,3 +53,12 @@ validation_reports/
 *.bak
 *.backup
 *_backup.*
+
+# Compressed archives (already extracted)
+*.zip
+
+# Test/generated outputs
+led_control/
+artifacts/
+code_verification_report.md
+realistic_workflow_with_errors.md
