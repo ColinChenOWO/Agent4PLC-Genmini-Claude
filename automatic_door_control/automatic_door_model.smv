@@ -1,0 +1,109 @@
+MODULE main
+
+VAR
+    -- Inputs
+    PresenceSensor : boolean;
+    SafetySensor : boolean;
+    OpenRequest : boolean;
+    LimitSwitchOpen : boolean;
+    LimitSwitchClosed : boolean;
+
+    -- Outputs
+
+    -- Internal Variables
+    CurrentState : {CLOSED, OPENING, OPEN, CLOSING, REOPENING_SAFETY};
+
+    -- Timers (Bounded Counters)
+    motor_timeout_count : 0..10;
+    close_delay_count : 0..5;
+
+    _oldPresenceSensor : boolean;
+    _risingEdgePresenceSensor : boolean;
+    _openRequestPulse : boolean;
+
+ASSIGN
+    -- Edge detection for PresenceSensor
+    init(_oldPresenceSensor) := FALSE;
+    next(_oldPresenceSensor) := PresenceSensor;
+    _risingEdgePresenceSensor := PresenceSensor & !(_oldPresenceSensor);
+
+    -- OpenRequest pulse (assuming it's a momentary button)
+        _openRequestPulse := OpenRequest;
+
+    -- Motor Timeout Counter Logic
+    init(motor_timeout_count) := 0;
+    next(motor_timeout_count) := case
+        (CurrentState = OPENING | CurrentState = CLOSING | CurrentState = REOPENING_SAFETY) & motor_timeout_count < 10 : motor_timeout_count + 1;
+        !(CurrentState = OPENING | CurrentState = CLOSING | CurrentState = REOPENING_SAFETY) : 0; -- Reset when not active
+        TRUE : motor_timeout_count; -- Hold when expired
+    esac;
+
+    -- Close Delay Counter Logic
+    init(close_delay_count) := 0;
+    next(close_delay_count) := case
+        -- If in OPEN state, and no presence/open request, and timer not expired, increment
+        CurrentState = OPEN & !PresenceSensor & !OpenRequest & close_delay_count < 5 : close_delay_count + 1;
+
+        -- If not in OPEN state, reset the timer
+        CurrentState != OPEN : 0;
+
+        -- If in OPEN state, but presence or open request is active, reset the timer
+        CurrentState = OPEN & (PresenceSensor | OpenRequest) : 0;
+
+        -- Otherwise (e.g., timer expired, or waiting for conditions), hold the current value
+        TRUE : close_delay_count;
+    esac;
+
+    -- Main State Machine
+    init(CurrentState) := CLOSED;
+    next(CurrentState) := case
+        -- Transitions from CLOSED
+        CurrentState = CLOSED & (_risingEdgePresenceSensor | PresenceSensor | _openRequestPulse) : OPENING;
+        -- Transitions from OPENING
+        CurrentState = OPENING & LimitSwitchOpen : OPEN;
+        CurrentState = OPENING & motor_timeout_expired : CLOSED; -- Timeout during opening, return to CLOSED
+        -- Transitions from OPEN
+        CurrentState = OPEN & !PresenceSensor & !OpenRequest & close_delay_expired : CLOSING;
+        CurrentState = OPEN & (PresenceSensor | OpenRequest) : OPEN; -- Reset delay if presence/open request (stay open)
+        -- Transitions from CLOSING (OpenRequest has highest priority over SafetySensor)
+        CurrentState = CLOSING & SafetySensor : REOPENING_SAFETY;
+        CurrentState = CLOSING & OpenRequest : OPENING;
+        CurrentState = CLOSING & LimitSwitchClosed : CLOSED;
+        CurrentState = CLOSING & motor_timeout_expired : OPEN; -- Timeout during closing, return to OPEN
+        -- Transitions from REOPENING_SAFETY (OpenRequest has highest priority)
+        CurrentState = REOPENING_SAFETY & OpenRequest : OPENING;
+        CurrentState = REOPENING_SAFETY & LimitSwitchOpen : OPEN;
+        CurrentState = REOPENING_SAFETY & motor_timeout_expired : CLOSING; -- Timeout during reopening, return to CLOSING
+        TRUE : CurrentState;
+    esac;
+
+-- DEFINE for Outputs and Expired Timers
+DEFINE
+    motor_timeout_expired := (motor_timeout_count = 10);
+    close_delay_expired := (close_delay_count = 5);
+    MotorOpen := ((CurrentState = OPENING) | (CurrentState = REOPENING_SAFETY)) & !LimitSwitchOpen;
+    MotorClose := (CurrentState = CLOSING) & !LimitSwitchClosed;
+    DoorOpenIndicator := (CurrentState = OPEN);
+    DoorClosedIndicator := (CurrentState = CLOSED);
+    close_delay_active := (CurrentState = OPEN & !PresenceSensor & !OpenRequest);
+
+-- Fairness Constraints (simple boolean expressions)
+FAIRNESS LimitSwitchOpen;
+FAIRNESS LimitSwitchClosed;
+FAIRNESS !PresenceSensor;
+
+-- Verification Properties (CTL)
+
+-- Safety Properties:
+CTLSPEC AG !(MotorOpen & MotorClose);
+CTLSPEC AG (DoorClosedIndicator -> CurrentState = CLOSED);
+CTLSPEC AG (DoorOpenIndicator -> CurrentState = OPEN);
+CTLSPEC AG (CurrentState = CLOSING & SafetySensor -> AX (CurrentState = REOPENING_SAFETY));
+CTLSPEC AG ((MotorOpen -> !LimitSwitchOpen) & (MotorClose -> !LimitSwitchClosed));
+
+-- Liveness Properties:
+CTLSPEC AG (CurrentState = OPENING -> AF (CurrentState = OPEN | CurrentState = CLOSED));
+CTLSPEC AG (CurrentState = CLOSING -> AF (CurrentState = CLOSED | CurrentState = OPEN | CurrentState = REOPENING_SAFETY));
+CTLSPEC AG (CurrentState = REOPENING_SAFETY -> AF (CurrentState = OPEN | CurrentState = CLOSING));
+CTLSPEC AG (OpenRequest -> AF (CurrentState = OPEN | CurrentState = OPENING | CurrentState = CLOSED));
+CTLSPEC AG (CurrentState = OPEN -> AF (CurrentState = CLOSING | CurrentState = OPEN));
